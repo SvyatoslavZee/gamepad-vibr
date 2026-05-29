@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gamepad Haptics Test</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 28px;
+      background: Canvas;
+      color: CanvasText;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      letter-spacing: 0;
+    }
+    p {
+      line-height: 1.5;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 18px 0;
+    }
+    button {
+      min-height: 40px;
+      padding: 0 14px;
+      border-radius: 8px;
+      border: 1px solid color-mix(in srgb, CanvasText 24%, transparent);
+      background: color-mix(in srgb, CanvasText 8%, Canvas);
+      color: CanvasText;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover {
+      background: color-mix(in srgb, CanvasText 14%, Canvas);
+    }
+    pre {
+      overflow: auto;
+      min-height: 260px;
+      padding: 14px;
+      border-radius: 8px;
+      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+      background: color-mix(in srgb, CanvasText 6%, Canvas);
+      white-space: pre-wrap;
+    }
+    .hint {
+      color: color-mix(in srgb, CanvasText 70%, transparent);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Gamepad / HID Controller Test</h1>
+    <p class="hint">Open this page in the same browser/app you use for cloud gaming. Press any controller button once, then use the buttons below.</p>
+    <div class="row">
+      <button id="refresh">Refresh gamepads</button>
+      <button id="rumble">Test dual-rumble</button>
+      <button id="pulse">Test pulse</button>
+      <button id="stop">Stop haptics</button>
+      <button id="hidRequest">Connect via WebHID</button>
+      <button id="hidRumble">WebHID controller rumble</button>
+      <button id="hidUsbClassic">USB classic</button>
+      <button id="hidUsbV2">USB v2</button>
+    </div>
+    <pre id="log">Waiting for a gamepad. Press any button on the controller.</pre>
+  </main>
+  <script>
+    const log = document.querySelector("#log");
+    const state = {
+      hidDevice: null,
+      hidEvents: [],
+      lastExtra: "",
+      outputSeq: 0,
+      syntheticGamepad: null,
+      nativeGetGamepads: navigator.getGamepads ? navigator.getGamepads.bind(navigator) : null,
+      transport: "unknown"
+    };
+
+    const sonyVendorId = 0x054c;
+    const dualSense = {
+      vendorId: sonyVendorId,
+      productId: 0x0ce6
+    };
+    const dualShock4ProductIds = new Set([0x05c4, 0x09cc]);
+
+    function crc32(bytes) {
+      let crc = 0xffffffff;
+      for (const byte of bytes) {
+        crc ^= byte;
+        for (let bit = 0; bit < 8; bit += 1) {
+          crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+        }
+      }
+      return (crc ^ 0xffffffff) >>> 0;
+    }
+
+    function describeGamepad(gamepad) {
+      if (!gamepad) return "No gamepad exposed through navigator.getGamepads().";
+      const vibration = gamepad.vibrationActuator;
+      const haptics = Array.from(gamepad.hapticActuators || []);
+      const pressed = gamepad.buttons
+        .map((button, index) => button.pressed ? index : null)
+        .filter((index) => index !== null);
+      const data = {
+        id: gamepad.id,
+        index: gamepad.index,
+        connected: gamepad.connected,
+        mapping: gamepad.mapping,
+        axes: gamepad.axes.map((axis) => Number(axis.toFixed(4))),
+        buttons: gamepad.buttons.length,
+        pressedButtons: pressed,
+        vibrationActuator: vibration ? {
+          type: vibration.type || null,
+          effects: vibration.effects || null
+        } : null,
+        hapticActuators: haptics.map((actuator) => ({
+          type: actuator.type || null,
+          effects: actuator.effects || null
+        }))
+      };
+      return JSON.stringify(data, null, 2);
+    }
+
+    function describeHid() {
+      if (!("hid" in navigator)) {
+        return "WebHID: not supported by this browser.";
+      }
+      const device = state.hidDevice;
+      if (!device) {
+        return "WebHID: no device opened. Click 'Connect via WebHID'.";
+      }
+      return JSON.stringify({
+        productName: device.productName,
+        vendorId: `0x${device.vendorId.toString(16)}`,
+        productId: `0x${device.productId.toString(16)}`,
+        opened: device.opened,
+        lastInputReports: state.hidEvents.slice(-8)
+      }, null, 2);
+    }
+
+    function makeButton(value = 0) {
+      const normalized = Math.max(0, Math.min(Number(value || 0), 1));
+      return {
+        pressed: normalized > 0.5,
+        touched: normalized > 0,
+        value: normalized
+      };
+    }
+
+    function normalizeAxis(value) {
+      return Math.max(-1, Math.min(1, ((value || 0) - 128) / 127));
+    }
+
+    function createSyntheticGamepad() {
+      const actuator = {
+        type: "dual-rumble",
+        effects: ["dual-rumble"],
+        async playEffect(effectType, params = {}) {
+          if (effectType !== "dual-rumble") return "not-supported";
+          const weak = Math.max(0, Math.min(Number(params.weakMagnitude || 0), 1));
+          const strong = Math.max(0, Math.min(Number(params.strongMagnitude || 0), 1));
+          const duration = Math.max(0, Math.min(Number(params.duration || 0), 5000));
+          await sendDualSenseReport(Math.round(weak * 255), Math.round(strong * 255));
+          if (duration > 0) {
+            setTimeout(() => sendDualSenseReport(0, 0).catch(() => {}), duration);
+          }
+          return "complete";
+        },
+        async pulse(value, duration) {
+          const magnitude = Math.max(0, Math.min(Number(value || 0), 1));
+          return this.playEffect("dual-rumble", {
+            duration,
+            weakMagnitude: magnitude,
+            strongMagnitude: magnitude
+          });
+        },
+        async reset() {
+          await sendDualSenseReport(0, 0);
+          return "complete";
+        }
+      };
+
+      const isDs4 = isDualShock4();
+      return {
+        id: `${isDs4 ? "Wireless Controller" : "DualSense Wireless Controller"} (WebHID Bridge)`,
+        index: 0,
+        connected: true,
+        mapping: "standard",
+        timestamp: performance.now(),
+        axes: [0, 0, 0, 0],
+        buttons: Array.from({ length: 18 }, () => makeButton(0)),
+        vibrationActuator: actuator,
+        hapticActuators: [actuator]
+      };
+    }
+
+    function ensureSyntheticGamepad() {
+      if (!state.syntheticGamepad) state.syntheticGamepad = createSyntheticGamepad();
+      return state.syntheticGamepad;
+    }
+
+    function setButton(gamepad, index, value) {
+      gamepad.buttons[index] = makeButton(value);
+    }
+
+    function updateDpad(gamepad, hat) {
+      setButton(gamepad, 12, hat === 0 || hat === 1 || hat === 7);
+      setButton(gamepad, 13, hat === 3 || hat === 4 || hat === 5);
+      setButton(gamepad, 14, hat === 5 || hat === 6 || hat === 7);
+      setButton(gamepad, 15, hat === 1 || hat === 2 || hat === 3);
+    }
+
+    function isDualShock4(device = state.hidDevice) {
+      return Boolean(device && device.vendorId === sonyVendorId && dualShock4ProductIds.has(device.productId));
+    }
+
+    function isDualSense(device = state.hidDevice) {
+      return Boolean(device && device.vendorId === dualSense.vendorId && device.productId === dualSense.productId);
+    }
+
+    function parseDualShock4InputReport(reportId, dataView) {
+      if (reportId !== 0x01 && reportId !== 0x11) return;
+      state.transport = reportId === 0x01 ? "usb-ds4" : "bluetooth-ds4";
+      const data = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+      const offset = reportId === 0x11 ? 2 : 0;
+      if (data.length < offset + 9) return;
+
+      const gamepad = ensureSyntheticGamepad();
+      gamepad.id = "Wireless Controller (WebHID Bridge)";
+      gamepad.timestamp = performance.now();
+      gamepad.axes[0] = normalizeAxis(data[offset + 0]);
+      gamepad.axes[1] = normalizeAxis(data[offset + 1]);
+      gamepad.axes[2] = normalizeAxis(data[offset + 2]);
+      gamepad.axes[3] = normalizeAxis(data[offset + 3]);
+
+      const buttons0 = data[offset + 4] || 0;
+      const buttons1 = data[offset + 5] || 0;
+      const buttons2 = data[offset + 6] || 0;
+      const leftTrigger = (data[offset + 7] || 0) / 255;
+      const rightTrigger = (data[offset + 8] || 0) / 255;
+
+      setButton(gamepad, 0, (buttons0 & 0x20) ? 1 : 0);
+      setButton(gamepad, 1, (buttons0 & 0x40) ? 1 : 0);
+      setButton(gamepad, 2, (buttons0 & 0x10) ? 1 : 0);
+      setButton(gamepad, 3, (buttons0 & 0x80) ? 1 : 0);
+      setButton(gamepad, 4, (buttons1 & 0x01) ? 1 : 0);
+      setButton(gamepad, 5, (buttons1 & 0x02) ? 1 : 0);
+      setButton(gamepad, 6, Math.max(leftTrigger, (buttons1 & 0x04) ? 1 : 0));
+      setButton(gamepad, 7, Math.max(rightTrigger, (buttons1 & 0x08) ? 1 : 0));
+      setButton(gamepad, 8, (buttons1 & 0x10) ? 1 : 0);
+      setButton(gamepad, 9, (buttons1 & 0x20) ? 1 : 0);
+      setButton(gamepad, 10, (buttons1 & 0x40) ? 1 : 0);
+      setButton(gamepad, 11, (buttons1 & 0x80) ? 1 : 0);
+      updateDpad(gamepad, buttons0 & 0x0f);
+      setButton(gamepad, 16, (buttons2 & 0x01) ? 1 : 0);
+      setButton(gamepad, 17, (buttons2 & 0x02) ? 1 : 0);
+    }
+
+    function parseDualSenseInputReport(reportId, dataView) {
+      if (reportId !== 0x31 && reportId !== 0x01) return;
+      state.transport = reportId === 0x01 ? "usb" : "bluetooth";
+      const data = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+      const offset = reportId === 0x31 ? 1 : 0;
+      if (data.length < offset + 10) return;
+
+      const gamepad = ensureSyntheticGamepad();
+      gamepad.timestamp = performance.now();
+      gamepad.axes[0] = normalizeAxis(data[offset + 0]);
+      gamepad.axes[1] = normalizeAxis(data[offset + 1]);
+      gamepad.axes[2] = normalizeAxis(data[offset + 2]);
+      gamepad.axes[3] = normalizeAxis(data[offset + 3]);
+
+      const leftTrigger = (data[offset + 4] || 0) / 255;
+      const rightTrigger = (data[offset + 5] || 0) / 255;
+      const buttons0 = data[offset + 7] || 0;
+      const buttons1 = data[offset + 8] || 0;
+      const buttons2 = data[offset + 9] || 0;
+
+      setButton(gamepad, 0, (buttons0 & 0x20) ? 1 : 0);
+      setButton(gamepad, 1, (buttons0 & 0x40) ? 1 : 0);
+      setButton(gamepad, 2, (buttons0 & 0x10) ? 1 : 0);
+      setButton(gamepad, 3, (buttons0 & 0x80) ? 1 : 0);
+      setButton(gamepad, 4, (buttons1 & 0x01) ? 1 : 0);
+      setButton(gamepad, 5, (buttons1 & 0x02) ? 1 : 0);
+      setButton(gamepad, 6, Math.max(leftTrigger, (buttons1 & 0x04) ? 1 : 0));
+      setButton(gamepad, 7, Math.max(rightTrigger, (buttons1 & 0x08) ? 1 : 0));
+      setButton(gamepad, 8, (buttons1 & 0x10) ? 1 : 0);
+      setButton(gamepad, 9, (buttons1 & 0x20) ? 1 : 0);
+      setButton(gamepad, 10, (buttons1 & 0x40) ? 1 : 0);
+      setButton(gamepad, 11, (buttons1 & 0x80) ? 1 : 0);
+      updateDpad(gamepad, buttons0 & 0x0f);
+      setButton(gamepad, 16, (buttons2 & 0x01) ? 1 : 0);
+      setButton(gamepad, 17, (buttons2 & 0x02) ? 1 : 0);
+    }
+
+    if (state.nativeGetGamepads) {
+      navigator.getGamepads = () => {
+        const gamepads = Array.from(state.nativeGetGamepads());
+        if (state.hidDevice && !gamepads.some(Boolean)) {
+          gamepads[0] = ensureSyntheticGamepad();
+        }
+        return gamepads;
+      };
+    }
+
+    function firstGamepad() {
+      return Array.from(navigator.getGamepads()).find(Boolean);
+    }
+
+    function render(extra = "") {
+      const gamepad = firstGamepad();
+      if (extra) state.lastExtra = extra;
+      log.textContent = [
+        "=== Gamepad API ===",
+        describeGamepad(gamepad),
+        "",
+        "=== WebHID ===",
+        describeHid(),
+        state.lastExtra ? `\n=== Last action ===\n${state.lastExtra}` : ""
+      ].join("\n");
+    }
+
+    async function playRumble() {
+      try {
+        const gamepad = firstGamepad();
+        if (!gamepad) return render("No gamepad found.");
+        const actuator = gamepad.vibrationActuator || (gamepad.hapticActuators || [])[0];
+        if (!actuator) return render("No haptic actuator exposed by this browser.");
+        if (actuator.playEffect) {
+          await actuator.playEffect("dual-rumble", {
+            startDelay: 0,
+            duration: 700,
+            weakMagnitude: 1,
+            strongMagnitude: 1
+          });
+          return render("Sent playEffect('dual-rumble').");
+        }
+        render("This actuator does not support playEffect().");
+      } catch (error) {
+        render(`Gamepad rumble failed: ${error.name || "Error"}: ${error.message || error}`);
+      }
+    }
+
+    async function playPulse() {
+      const gamepad = firstGamepad();
+      if (!gamepad) return render("No gamepad found.");
+      const actuator = gamepad.vibrationActuator || (gamepad.hapticActuators || [])[0];
+      if (!actuator) return render("No haptic actuator exposed by this browser.");
+      if (actuator.pulse) {
+        await actuator.pulse(1, 700);
+        return render("Sent pulse(1, 700).");
+      }
+      render("This actuator does not support pulse().");
+    }
+
+    async function stopHaptics() {
+      const gamepad = firstGamepad();
+      const actuator = gamepad && (gamepad.vibrationActuator || (gamepad.hapticActuators || [])[0]);
+      if (actuator && actuator.reset) await actuator.reset();
+      render("Sent reset(), if supported.");
+    }
+
+    async function connectWebHid() {
+      try {
+        if (!("hid" in navigator)) return render("WebHID is not supported by this browser.");
+        const devices = await navigator.hid.requestDevice({
+          filters: [
+            { vendorId: sonyVendorId }
+          ]
+        });
+        const device = devices[0];
+        if (!device) return render("No WebHID device selected.");
+        if (!device.opened) await device.open();
+        device.addEventListener("inputreport", (event) => {
+          const bytes = Array.from(new Uint8Array(event.data.buffer)).slice(0, 12);
+          state.hidEvents.push({
+            reportId: event.reportId,
+            bytes: bytes.map((byte) => byte.toString(16).padStart(2, "0")).join(" ")
+          });
+          if (isDualShock4()) parseDualShock4InputReport(event.reportId, event.data);
+          else parseDualSenseInputReport(event.reportId, event.data);
+          render();
+        });
+        state.hidDevice = device;
+        ensureSyntheticGamepad();
+        render("Opened WebHID device. Press buttons and move sticks.");
+      } catch (error) {
+        render(`WebHID connect failed: ${error.name || "Error"}: ${error.message || error}`);
+      }
+    }
+
+    async function sendDualSenseUsbReport(rightMotor, leftMotor, mode = "auto") {
+      const device = state.hidDevice;
+      if (!device) throw new Error("Connect DualSense through WebHID first.");
+      if (device.vendorId !== dualSense.vendorId || device.productId !== dualSense.productId) {
+        throw new Error("Selected WebHID device is not a DualSense 0x054c/0x0ce6.");
+      }
+
+      const report = new Uint8Array(47);
+      report[0] = mode === "v2" ? 0x02 : 0x03;
+      report[2] = rightMotor;
+      report[3] = leftMotor;
+      if (mode === "v2" || mode === "auto") {
+        report[38] = 0x04;
+      }
+      await device.sendReport(0x02, report);
+      state.transport = `usb-${mode}`;
+    }
+
+    async function sendDualShock4UsbReport(rightMotor, leftMotor) {
+      const device = state.hidDevice;
+      if (!device) throw new Error("Connect controller through WebHID first.");
+      if (!isDualShock4(device)) {
+        throw new Error(`Selected device is not a supported DS4 Wireless Controller: 0x${device.vendorId.toString(16)}/0x${device.productId.toString(16)}.`);
+      }
+      const report = new Uint8Array(31);
+      report[0] = 0xff;
+      report[1] = 0x04;
+      report[2] = 0x00;
+      report[3] = rightMotor;
+      report[4] = leftMotor;
+      await device.sendReport(0x05, report);
+      state.transport = "usb-ds4";
+    }
+
+    async function sendDualSenseBluetoothReport(rightMotor, leftMotor) {
+      const device = state.hidDevice;
+      if (!device) throw new Error("Connect DualSense through WebHID first.");
+      if (device.vendorId !== dualSense.vendorId || device.productId !== dualSense.productId) {
+        throw new Error("Selected WebHID device is not a DualSense 0x054c/0x0ce6.");
+      }
+
+      // WebHID's sendReport() omits the report ID byte. Payload layout for
+      // DualSense Bluetooth report 0x31 is: seq_tag, tag, common[47], pad, crc.
+      const report = new Uint8Array(77);
+      report[0] = (state.outputSeq++ & 0x0f) << 4;
+      report[1] = 0x10;
+      report[2] = 0x03;
+      report[4] = rightMotor;
+      report[5] = leftMotor;
+      report[40] = 0x04;
+
+      const crcInput = new Uint8Array(79);
+      crcInput[0] = 0xa2;
+      crcInput[1] = 0x31;
+      crcInput.set(report, 2);
+      const crc = crc32(crcInput.slice(0, 75));
+      report[73] = crc & 0xff;
+      report[74] = (crc >>> 8) & 0xff;
+      report[75] = (crc >>> 16) & 0xff;
+      report[76] = (crc >>> 24) & 0xff;
+      await device.sendReport(0x31, report);
+      state.transport = "bluetooth";
+    }
+
+    async function sendDualSenseReport(rightMotor, leftMotor) {
+      if (isDualShock4()) {
+        await sendDualShock4UsbReport(rightMotor, leftMotor);
+        return;
+      }
+      if (state.transport === "usb") {
+        await sendDualSenseUsbReport(rightMotor, leftMotor);
+        return;
+      }
+      if (state.transport === "bluetooth") {
+        await sendDualSenseBluetoothReport(rightMotor, leftMotor);
+        return;
+      }
+      try {
+        await sendDualSenseUsbReport(rightMotor, leftMotor);
+      } catch (usbError) {
+        await sendDualSenseBluetoothReport(rightMotor, leftMotor);
+      }
+    }
+
+    async function webHidDualSenseRumble() {
+      try {
+        await sendDualSenseReport(0xff, 0xff);
+        render(`Sent DualSense ${state.transport} rumble through WebHID.`);
+      } catch (error) {
+        render(`WebHID rumble failed: ${error.name || "Error"}: ${error.message || error}`);
+        return;
+      }
+      setTimeout(async () => {
+        try {
+          await sendDualSenseReport(0x00, 0x00);
+        } catch (error) {
+          render(`WebHID stop rumble failed: ${error.name || "Error"}: ${error.message || error}`);
+        }
+      }, 700);
+    }
+
+    async function webHidUsbVariant(mode) {
+      try {
+        await sendDualSenseUsbReport(0xff, 0xff, mode);
+        render(`Sent DualSense USB ${mode} report through WebHID.`);
+      } catch (error) {
+        render(`USB ${mode} failed: ${error.name || "Error"}: ${error.message || error}`);
+        return;
+      }
+      setTimeout(async () => {
+        try {
+          await sendDualSenseUsbReport(0x00, 0x00, mode);
+        } catch (error) {
+          render(`USB ${mode} stop failed: ${error.name || "Error"}: ${error.message || error}`);
+        }
+      }, 700);
+    }
+
+    window.addEventListener("error", (event) => render(`Page error: ${event.message}`));
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason || {};
+      render(`Unhandled promise rejection: ${reason.name || "Error"}: ${reason.message || reason}`);
+    });
+
+    window.addEventListener("gamepadconnected", () => render("Gamepad connected."));
+    window.addEventListener("gamepaddisconnected", () => render("Gamepad disconnected."));
+    document.querySelector("#refresh").addEventListener("click", () => render());
+    document.querySelector("#rumble").addEventListener("click", playRumble);
+    document.querySelector("#pulse").addEventListener("click", playPulse);
+    document.querySelector("#stop").addEventListener("click", stopHaptics);
+    document.querySelector("#hidRequest").addEventListener("click", connectWebHid);
+    document.querySelector("#hidRumble").addEventListener("click", webHidDualSenseRumble);
+    document.querySelector("#hidUsbClassic").addEventListener("click", () => webHidUsbVariant("classic"));
+    document.querySelector("#hidUsbV2").addEventListener("click", () => webHidUsbVariant("v2"));
+    setInterval(render, 1000);
+  </script>
+</body>
+</html>
