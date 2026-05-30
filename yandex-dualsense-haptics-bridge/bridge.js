@@ -38,11 +38,15 @@
 
   function makeButton(value = 0) {
     const normalized = Math.max(0, Math.min(Number(value || 0), 1));
-    return {
+    const button = {
       pressed: normalized > 0.5,
       touched: normalized > 0,
       value: normalized
     };
+    try {
+      if ("GamepadButton" in window) Object.setPrototypeOf(button, GamepadButton.prototype);
+    } catch (error) {}
+    return button;
   }
 
   function normalizeAxis(value) {
@@ -51,7 +55,7 @@
 
   function createSyntheticGamepad() {
     const buttons = Array.from({ length: 18 }, () => makeButton(0));
-    return {
+    const gamepad = {
       id: `${isDualShock4() ? "Wireless Controller" : "DualSense Wireless Controller"} (WebHID Bridge)`,
       index: 0,
       connected: true,
@@ -62,6 +66,10 @@
       vibrationActuator: bridgeActuator,
       hapticActuators: [bridgeActuator]
     };
+    try {
+      if ("Gamepad" in window) Object.setPrototypeOf(gamepad, Gamepad.prototype);
+    } catch (error) {}
+    return gamepad;
   }
 
   function setButton(gamepad, index, value) {
