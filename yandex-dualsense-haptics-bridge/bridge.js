@@ -13,7 +13,19 @@
     lastStatus: "not connected",
     patchedGamepads: new WeakSet(),
     syntheticGamepad: null,
-    transport: "unknown"
+    transport: "unknown",
+    rumbleCalls: 0,
+    lastGamepadCount: 0,
+    lastHasBridgeActuator: false,
+    connectedEventSent: false,
+    pointerTouchpad: false,
+    touchpad: {
+      active: false,
+      x: 0,
+      y: 0,
+      id: 0,
+      lastPointerDown: false
+    }
   };
 
   function isDualShock4(device = state.device) {
@@ -26,11 +38,15 @@
 
   function makeButton(value = 0) {
     const normalized = Math.max(0, Math.min(Number(value || 0), 1));
-    return {
+    const button = {
       pressed: normalized > 0.5,
       touched: normalized > 0,
       value: normalized
     };
+    try {
+      if ("GamepadButton" in window) Object.setPrototypeOf(button, GamepadButton.prototype);
+    } catch (error) {}
+    return button;
   }
 
   function normalizeAxis(value) {
@@ -39,7 +55,7 @@
 
   function createSyntheticGamepad() {
     const buttons = Array.from({ length: 18 }, () => makeButton(0));
-    return {
+    const gamepad = {
       id: `${isDualShock4() ? "Wireless Controller" : "DualSense Wireless Controller"} (WebHID Bridge)`,
       index: 0,
       connected: true,
@@ -50,6 +66,10 @@
       vibrationActuator: bridgeActuator,
       hapticActuators: [bridgeActuator]
     };
+    try {
+      if ("Gamepad" in window) Object.setPrototypeOf(gamepad, Gamepad.prototype);
+    } catch (error) {}
+    return gamepad;
   }
 
   function setButton(gamepad, index, value) {
@@ -100,6 +120,7 @@
     updateDpad(gamepad, buttons0 & 0x0f);
     setButton(gamepad, 16, (buttons2 & 0x01) ? 1 : 0);
     setButton(gamepad, 17, (buttons2 & 0x02) ? 1 : 0);
+    parseDualSenseTouchpad(data, offset);
   }
 
   function parseDualShock4InputReport(reportId, dataView) {
@@ -140,6 +161,64 @@
     updateDpad(gamepad, buttons0 & 0x0f);
     setButton(gamepad, 16, (buttons2 & 0x01) ? 1 : 0);
     setButton(gamepad, 17, (buttons2 & 0x02) ? 1 : 0);
+  }
+
+  function updateTouchpadState(active, rawX = 0, rawY = 0, id = 0) {
+    state.touchpad.active = active;
+    state.touchpad.x = active ? Math.max(0, Math.min(1, rawX / 1919)) : 0;
+    state.touchpad.y = active ? Math.max(0, Math.min(1, rawY / 1079)) : 0;
+    state.touchpad.id = id;
+    if (state.pointerTouchpad) dispatchTouchpadPointer();
+  }
+
+  function parseDualSenseTouchpad(data, offset) {
+    const touchOffset = offset + 32;
+    if (data.length < touchOffset + 4) {
+      updateTouchpadState(false);
+      return;
+    }
+    const contact = data[touchOffset];
+    const active = (contact & 0x80) === 0;
+    if (!active) {
+      updateTouchpadState(false);
+      return;
+    }
+    const rawX = data[touchOffset + 1] | ((data[touchOffset + 2] & 0x0f) << 8);
+    const rawY = ((data[touchOffset + 2] & 0xf0) >> 4) | (data[touchOffset + 3] << 4);
+    updateTouchpadState(true, rawX, rawY, contact & 0x7f);
+  }
+
+  function dispatchTouchpadPointer() {
+    const active = state.touchpad.active;
+    const x = Math.round(state.touchpad.x * Math.max(1, window.innerWidth - 1));
+    const y = Math.round(state.touchpad.y * Math.max(1, window.innerHeight - 1));
+    const target = document.elementFromPoint(x, y) || document.body || document.documentElement;
+    if (!target) return;
+    const eventOptions = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      pointerId: 17,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: x,
+      clientY: y,
+      screenX: window.screenX + x,
+      screenY: window.screenY + y,
+      buttons: active ? 1 : 0,
+      button: active ? 0 : -1
+    };
+    const type = active
+      ? (state.touchpad.lastPointerDown ? "pointermove" : "pointerdown")
+      : (state.touchpad.lastPointerDown ? "pointerup" : null);
+    if (!type) return;
+    state.touchpad.lastPointerDown = active;
+    try {
+      target.dispatchEvent(new PointerEvent(type, eventOptions));
+    } catch (error) {
+      const fallback = new MouseEvent(type === "pointermove" ? "mousemove" : type === "pointerdown" ? "mousedown" : "mouseup", eventOptions);
+      target.dispatchEvent(fallback);
+    }
   }
 
   function crc32(bytes) {
@@ -240,6 +319,8 @@
       const rightMotor = Math.round(weak * 255);
       const leftMotor = Math.round(strong * 255);
 
+      state.rumbleCalls += 1;
+      updateBridgeStatus();
       await sendControllerReport(rightMotor, leftMotor);
       if (duration > 0) {
         window.setTimeout(() => {
@@ -365,9 +446,41 @@
       if (!navigator.getGamepads) return;
       const gamepads = navigator.getGamepads();
       for (const gamepad of gamepads) attachBridgeActuator(gamepad);
+      updateGamepadProbeState(Array.from(gamepads).filter(Boolean));
     } catch (error) {
       setStatus(`existing gamepad patch failed: ${error.message || error}`);
     }
+  }
+
+  function emitGamepadConnected() {
+    if (state.connectedEventSent) return;
+    state.connectedEventSent = true;
+    const gamepads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+    const gamepad = gamepads[0] || state.syntheticGamepad || createSyntheticGamepad();
+    attachBridgeActuator(gamepad);
+    try {
+      window.dispatchEvent(new GamepadEvent("gamepadconnected", { gamepad }));
+    } catch (error) {
+      const event = new Event("gamepadconnected");
+      event.gamepad = gamepad;
+      window.dispatchEvent(event);
+    }
+  }
+
+  function updateGamepadProbeState(gamepads) {
+    state.lastGamepadCount = gamepads.length;
+    state.lastHasBridgeActuator = gamepads.some((gamepad) => gamepad.vibrationActuator === bridgeActuator);
+  }
+
+  function updateBridgeStatus() {
+    if (!state.device) {
+      setStatus(`Controller haptics: not connected, ${state.lastGamepadCount} gamepad(s)`);
+      return;
+    }
+    setStatus(
+      `Controller haptics: ${state.transport}, ${state.lastGamepadCount} gamepad(s), ` +
+      `bridge ${state.lastHasBridgeActuator ? "yes" : "no"}, rumble ${state.rumbleCalls}`
+    );
   }
 
   function installDebugApi() {
@@ -383,8 +496,17 @@
         opened: Boolean(state.device && state.device.opened),
         lastStatus: state.lastStatus,
         getGamepadsPatched: Boolean(navigator.getGamepads && navigator.getGamepads.__dualSenseBridgePatched),
-        transport: state.transport
-      })
+        transport: state.transport,
+        rumbleCalls: state.rumbleCalls,
+        gamepadCount: state.lastGamepadCount,
+        hasBridgeActuator: state.lastHasBridgeActuator,
+        touchpad: { ...state.touchpad },
+        pointerTouchpad: state.pointerTouchpad
+      }),
+      setPointerTouchpad: (enabled) => {
+        state.pointerTouchpad = Boolean(enabled);
+        return state.pointerTouchpad;
+      }
     };
   }
 
@@ -392,11 +514,8 @@
     window.setInterval(() => {
       try {
         const gamepads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
-        if (!gamepads.length) return;
-        const hasBridge = gamepads.some((gamepad) => gamepad.vibrationActuator === bridgeActuator);
-        if (state.device && hasBridge) {
-          setStatus(`DualSense haptics: connected, ${gamepads.length} gamepad(s) patched`);
-        }
+        updateGamepadProbeState(gamepads);
+        updateBridgeStatus();
       } catch (error) {
         // Keep the page quiet if a site blocks polling.
       }
@@ -417,7 +536,9 @@
       if (isDualShock4()) parseDualShock4InputReport(event.reportId, event.data);
       else parseDualSenseInputReport(event.reportId, event.data);
     });
-    setStatus(`Controller haptics: connected (${device.productName})`);
+    patchExistingGamepads();
+    emitGamepadConnected();
+    updateBridgeStatus();
     return device;
   }
 
@@ -497,11 +618,30 @@
     ].join(";");
     button.addEventListener("click", connect);
 
+    const test = document.createElement("button");
+    test.type = "button";
+    test.textContent = "Test";
+    test.style.cssText = button.style.cssText;
+    test.addEventListener("click", () => bridgeActuator.playEffect("dual-rumble", {
+      duration: 350,
+      weakMagnitude: 1,
+      strongMagnitude: 1
+    }).catch((error) => setStatus(error.message || String(error))));
+
+    const touchpad = document.createElement("button");
+    touchpad.type = "button";
+    touchpad.textContent = "Touchpad Pointer";
+    touchpad.style.cssText = button.style.cssText;
+    touchpad.addEventListener("click", () => {
+      state.pointerTouchpad = !state.pointerTouchpad;
+      setStatus(`Touchpad pointer ${state.pointerTouchpad ? "on" : "off"}`);
+    });
+
     const status = document.createElement("span");
     status.id = "dualsense-haptics-bridge-status";
     status.textContent = state.lastStatus;
 
-    root.append(button, status);
+    root.append(button, test, touchpad, status);
     document.documentElement.appendChild(root);
   }
 
@@ -509,6 +649,10 @@
     patchGamepadPrototype();
     installDebugApi();
     installGamepadProbe();
+    window.addEventListener("gamepadconnected", (event) => {
+      attachBridgeActuator(event.gamepad);
+      patchExistingGamepads();
+    }, true);
   } catch (error) {
     setStatus(`Gamepad patch failed: ${error.message || error}`);
   }
