@@ -148,11 +148,6 @@ game/client support for a separate controller-speaker audio path. This bridge
 does not currently provide real Spider-Man 2 controller-speaker effects because
 the browser/cloud client does not expose that separate audio stream.
 
-## VPN Note
-
-Final testing showed that VPN is not required for the bridge or in-game
-vibration to work.
-
 ## Current Status
 
 Working proof of concept:
