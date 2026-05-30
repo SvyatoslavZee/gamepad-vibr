@@ -1,0 +1,5 @@
+.DS_Store
+*.plist
+dualsense_native_rumble
+node_modules/
+npm-debug.log*
