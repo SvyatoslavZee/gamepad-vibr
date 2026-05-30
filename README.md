@@ -1,23 +1,24 @@
-# DualSense Haptics Bridge for Yandex Cloud Gaming
+# Вибрация DualSense в Игромире / Плюс Гейминге
 
-Proof-of-concept bridge that makes a Sony DualSense controller expose working
-browser haptics in Yandex cloud gaming pages.
+Рабочий bridge для Sony DualSense на macOS: помогает Яндекс Игромиру / Плюс Геймингу увидеть геймпад корректно и включить вибрацию в игре.
 
-The confirmed working path is:
+Проверено в Marvel's Spider-Man 2 через Игромир:
 
-1. Yandex Browser loads an Igromir / Plus Gaming page.
-2. `bridge.js` patches the page's `navigator.getGamepads()` result.
-3. The page sees a gamepad with `vibrationActuator.playEffect("dual-rumble")`.
-4. The bridge sends rumble commands to DualSense through WebHID.
+- управление работает;
+- вибрация в игре работает;
+- USB работает;
+- Bluetooth работает;
+- VPN не нужен.
 
-This was tested with Marvel's Spider-Man 2 in Igromir/Yandex cloud gaming:
-game input and in-game vibration work.
+## Самый короткий путь
 
-## Quick Start
+Нужно сделать один раз перед запуском игры.
 
-1. Clone or download this repository.
-2. Open a terminal in the repository folder.
-3. Start Yandex Browser with DevTools enabled:
+1. Нажмите зеленую кнопку **Code** на этой странице.
+2. Нажмите **Download ZIP**.
+3. Распакуйте архив.
+4. Откройте Terminal в распакованной папке.
+5. Запустите Яндекс.Браузер специальной командой:
 
 ```bash
 "/Applications/Yandex.app/Contents/MacOS/Yandex" \
@@ -26,139 +27,100 @@ game input and in-game vibration work.
   "https://igromir.yandex.ru/"
 ```
 
-4. Start the bridge injector:
+6. Во втором окне Terminal запустите bridge:
 
 ```bash
 node yandex-dualsense-haptics-bridge/inject-devtools-bridge.js
 ```
 
-5. Open Igromir / Plus Gaming.
-6. In the page overlay click `Connect Controller haptics`.
-7. Choose the real Sony device:
-   - USB: `Wireless Controller`
-   - Bluetooth: `DualSense Wireless Controller`
-8. Do not choose `GamePad-1`; that is macOS's synthetic compatibility device.
-9. Click `Test` and confirm that the controller vibrates.
-10. Launch the game.
+7. В открывшемся Игромире нажмите кнопку **Connect Controller haptics**.
+8. В окне выбора устройства выберите настоящий DualSense:
+   - по USB: **Wireless Controller**;
+   - по Bluetooth: **DualSense Wireless Controller**.
+9. Не выбирайте **GamePad-1**. Это виртуальный слой macOS, через него вибрация не работает.
+10. Нажмите **Test**. Геймпад должен завибрировать.
+11. Запускайте игру.
 
-Expected overlay state before launching the game:
+Если все правильно, в углу страницы будет маленькая панель со статусом вроде:
 
 ```text
 bridge yes
 1 gamepad(s)
-rumble N
+rumble 0
 ```
 
-If the `Test` button vibrates and `rumble N` grows during gameplay, the game is
-calling the browser haptics API and the bridge is receiving it.
+Во время игры число `rumble` должно расти, когда игра отправляет вибрацию.
 
-## What Works
+## Что скачивать
 
-- DualSense over USB.
-- DualSense over Bluetooth.
-- In-game vibration through browser `GamepadHapticActuator`.
-- Manual haptics test button in the page overlay.
-- DevTools injector flow for pages where unpacked extension loading is awkward.
-- Touchpad data reading from DualSense HID reports.
-- Optional experimental `Touchpad Pointer` mode that converts touchpad movement
-  into browser pointer/mouse events.
-
-## What Does Not Work Yet
-
-- Built-in DualSense speaker effects from PlayStation games.
-  macOS can expose DualSense as an audio device over USB, but in testing the
-  audio output goes through the controller's 3.5 mm headphone jack, not the
-  built-in controller speaker.
-- Native macOS cursor control from the touchpad.
-  Browser code can synthesize pointer events inside a web page, but system-wide
-  cursor control would require a native macOS helper.
-
-## Repository Layout
-
-- `yandex-dualsense-haptics-bridge/bridge.js`
-  Main browser-side bridge. It patches the Gamepad API, opens the controller
-  through WebHID, sends rumble reports, reads touchpad data, and renders the
-  small debug overlay.
-
-- `yandex-dualsense-haptics-bridge/content.js`
-  Fallback content-script injector for extension mode.
-
-- `yandex-dualsense-haptics-bridge/manifest.json`
-  Manifest V3 extension definition. It targets Yandex/Igromir pages and injects
-  `bridge.js` in the page's `MAIN` world at `document_start`.
-
-- `yandex-dualsense-haptics-bridge/inject-devtools-bridge.js`
-  Local DevTools Protocol injector. This is the most reproducible flow during
-  development because it injects the current `bridge.js` into matching Yandex
-  tabs and keeps scanning for new pages.
-
-- `controller-haptics-test.html`
-  Standalone local test page for Gamepad API and WebHID haptics.
-
-- `install-dualsense-plusgaming-bridge.html`
-  Bookmarklet installer page. Useful as a fallback/manual route.
-
-- `dualsense_native_rumble.c`
-  macOS IOKit diagnostic utility used to verify USB rumble outside the browser.
-
-## Requirements
-
-- macOS.
-- Yandex Browser.
-- Sony DualSense controller.
-- Node.js available on PATH.
-- Yandex Browser launched with DevTools remote debugging for the injector flow.
-
-## Validation Commands
+Для обычного пользователя ничего собирать не нужно. Скачивайте весь репозиторий через **Code -> Download ZIP** и запускайте только:
 
 ```bash
-node --check yandex-dualsense-haptics-bridge/bridge.js
-node --check yandex-dualsense-haptics-bridge/inject-devtools-bridge.js
-node -e "JSON.parse(require('fs').readFileSync('yandex-dualsense-haptics-bridge/manifest.json', 'utf8')); console.log('manifest json ok')"
+node yandex-dualsense-haptics-bridge/inject-devtools-bridge.js
 ```
 
-## Extension Mode
+Главная рабочая папка:
 
-The `yandex-dualsense-haptics-bridge` folder is also a Manifest V3 unpacked
-extension. In environments where Yandex Browser allows local unpacked extension
-loading, load that folder from the browser's extensions page.
+```text
+yandex-dualsense-haptics-bridge/
+```
 
-The extension path is cleaner for end users, but the DevTools injector is the
-most reliable development path because it guarantees that the current local
-`bridge.js` is injected into the active Yandex gaming page.
+## Что внутри
 
-## Touchpad
+```text
+yandex-dualsense-haptics-bridge/
+  bridge.js                  основной код bridge
+  inject-devtools-bridge.js   запуск bridge в открытой вкладке Игромира
+  manifest.json               пример расширения для браузера
+  content.js                  fallback-инжектор для extension mode
 
-DualSense touchpad click is exposed as gamepad button `17`.
+docs/
+  troubleshooting.md          диагностика проблем
+  yandex-integration-notes.md технические заметки для разработчиков Яндекса
+```
 
-The bridge also reads touch contact coordinates from HID reports. The overlay's
-`Touchpad Pointer` button enables an experimental mode that converts touchpad
-touches into browser `PointerEvent` / mouse events.
+## Если что-то не работает
 
-This can help web canvases that accept pointer input, but it is not the same as
-native PlayStation touchpad support inside the streamed game.
+### Кнопка Test вибрирует, но в игре вибрации нет
 
-## Audio / Controller Speaker
+Смотрите на `rumble N` в панели.
 
-DualSense over USB may appear in macOS as an audio output device. In testing,
-sound is routed to headphones connected to the controller's 3.5 mm jack.
+Если `rumble N` растет, значит игра вызывает вибрацию, bridge ее видит, но проблема в выбранном HID-устройстве или отправке команды на геймпад. Переподключите геймпад и снова выберите **Wireless Controller** / **DualSense Wireless Controller**, не **GamePad-1**.
 
-The built-in DualSense speaker used by PlayStation games appears to require
-game/client support for a separate controller-speaker audio path. This bridge
-does not currently provide real Spider-Man 2 controller-speaker effects because
-the browser/cloud client does not expose that separate audio stream.
+Если `rumble N` не растет, значит игра не видит bridge. Перезапустите Яндекс.Браузер командой из инструкции, запустите `inject-devtools-bridge.js`, обновите страницу Игромира и подключите геймпад до запуска игры.
 
-## Current Status
+### В списке устройств два варианта
 
-Working proof of concept:
+Выбирайте настоящий Sony-геймпад:
 
-- Game input works.
-- In-game haptics work.
-- The bridge is reproducible through the DevTools injector.
+- **Wireless Controller** для USB;
+- **DualSense Wireless Controller** для Bluetooth.
 
-Next work:
+**GamePad-1** не выбирайте.
 
-- Harden touchpad pointer mode.
-- Research DualSense speaker protocol and whether Yandex can expose a separate
-  controller-speaker audio channel.
-- Package the project as a first-party Yandex integration path.
+### Звук через динамик DualSense не работает
+
+macOS может показывать DualSense как аудиоустройство по USB, но звук уходит в наушники, подключенные в 3.5 мм разъем геймпада. Встроенный динамик DualSense, как на PlayStation, требует отдельной поддержки со стороны игры или облачного клиента. Этот bridge сейчас решает управление и вибрацию, но не нативный звук из динамика геймпада.
+
+## Для разработчиков
+
+Bridge запускается в контексте страницы Игромира и делает три вещи:
+
+1. Открывает реальный Sony-контроллер через WebHID.
+2. Патчит `navigator.getGamepads()` так, чтобы игровой клиент видел `vibrationActuator.playEffect("dual-rumble")`.
+3. Отправляет rumble-команды обратно в DualSense через HID output reports.
+
+Важные детали реализации:
+
+- Sony vendor ID: `0x054c`.
+- DualSense product ID: `0x0ce6`.
+- USB DualSense на macOS использует report ID `0x02` и payload `47` bytes.
+- Bluetooth DualSense использует report ID `0x31` и CRC32.
+- Код должен запускаться рано, до того как игровой клиент закеширует `navigator.getGamepads()`.
+- Для extension-интеграции важны `document_start`, `all_frames` и `world: "MAIN"`.
+
+Подробности для интеграции внутри клиента Яндекса лежат в [docs/yandex-integration-notes.md](docs/yandex-integration-notes.md).
+
+## Статус
+
+Это рабочий proof of concept. Лучший финальный вариант для пользователей — встроить этот bridge прямо в клиент Игромира / Плюс Гейминга, чтобы не требовались Terminal, remote debugging и ручной injector.
